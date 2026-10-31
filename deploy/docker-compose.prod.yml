@@ -1,0 +1,83 @@
+# Zawli on one Linux server: app + PostgreSQL + Caddy (automatic HTTPS) + daily backups.
+# See docs/DEPLOYMENT.md. Run from the project root:
+#   docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env.production up -d --build
+name: zawli
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: zawli
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: zawli
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zawli -d zawli"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # Not published to the internet: only the app can reach it.
+
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://zawli:${POSTGRES_PASSWORD}@db:5432/zawli
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?set BETTER_AUTH_SECRET}
+      BETTER_AUTH_URL: https://${DOMAIN:?set DOMAIN}
+      APP_URL: https://${DOMAIN}
+      PAYMENT_SECRETS_KEY: ${PAYMENT_SECRETS_KEY:?set PAYMENT_SECRETS_KEY}
+      CRON_SECRET: ${CRON_SECRET:-}
+      NEXT_PUBLIC_BRAND_NAME: ${BRAND_NAME:-Zawli}
+      HOSTNAME: 0.0.0.0
+      PORT: "3000"
+    volumes:
+      - uploads:/app/storage/uploads
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [app]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  # Nightly database dump kept for 14 days in the "backups" volume.
+  # Copy these off the server too (see docs/DEPLOYMENT.md → Backups).
+  backup:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - backups:/backups
+    entrypoint: >
+      sh -c 'while true; do
+        f=/backups/zawli-$$(date +%F).dump;
+        pg_dump -h db -U zawli -d zawli --format=custom --file="$$f" && echo "backup ok: $$f";
+        find /backups -name "zawli-*.dump" -mtime +14 -delete;
+        sleep 86400;
+      done'
+
+volumes:
+  pgdata:
+  uploads:
+  backups:
+  caddy_data:
+  caddy_config:

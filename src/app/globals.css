@@ -1,0 +1,114 @@
+@import "tailwindcss";
+
+/* ───────────────────────── Zawli design tokens ─────────────────────────
+   Deep forest green, warm ivory, charcoal, and a bright lime accent.
+   Lime is an ACCENT (focus, highlights, primary CTA fill with dark text) —
+   never body text on light backgrounds (insufficient contrast). */
+@theme {
+  --font-sans: var(--font-geist), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-bricolage), var(--font-geist), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --color-forest-950: #0a1f16;
+  --color-forest-900: #0f2b1f;
+  --color-forest-800: #143827;
+  --color-forest-700: #1a4a33;
+  --color-forest-600: #215c40;
+  --color-forest-500: #2b7752;
+  --color-forest-100: #dcebe2;
+  --color-forest-50: #eef6f1;
+
+  --color-ivory-50: #fcfaf5;
+  --color-ivory-100: #f7f3e8;
+  --color-ivory-200: #ede6d4;
+  --color-ivory-300: #ddd3bb;
+
+  --color-charcoal-950: #141512;
+  --color-charcoal-900: #1d1e1b;
+  --color-charcoal-800: #2a2b27;
+  --color-charcoal-700: #3b3c37;
+  --color-charcoal-600: #55564f;
+  --color-charcoal-500: #6e6e66;
+  --color-charcoal-400: #8f8e84;
+  --color-charcoal-300: #b3b1a6;
+
+  --color-lime-300: #d4f78a;
+  --color-lime-400: #c2ee4f;
+  --color-lime-500: #a6d92a;
+  --color-lime-600: #7fae12;
+
+  --color-danger-700: #a1281c;
+  --color-danger-600: #b9301f;
+  --color-danger-50: #fcedea;
+  --color-warning-700: #8f4b06;
+  --color-warning-500: #d98a1c;
+  --color-warning-50: #fdf3e2;
+  --color-info-700: #1f4f8a;
+  --color-info-50: #e9f0fa;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+
+  --shadow-card: 0 1px 0 rgb(20 21 18 / 0.04), 0 1px 2px rgb(20 21 18 / 0.06);
+  --shadow-pop: 0 10px 30px -10px rgb(20 21 18 / 0.25), 0 2px 6px rgb(20 21 18 / 0.08);
+
+  --animate-pulse-soft: pulse-soft 2s ease-in-out infinite;
+}
+
+@keyframes pulse-soft {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    background: var(--color-ivory-50);
+    color: var(--color-charcoal-900);
+    font-family: var(--font-sans);
+    font-feature-settings: "ss01", "cv11";
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-forest-600);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+  ::selection {
+    background: var(--color-lime-300);
+    color: var(--color-charcoal-950);
+  }
+  /* Tabular figures for every number column, price and order reference. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Print: only the printable area, no app chrome. */
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  body {
+    background: white;
+  }
+}

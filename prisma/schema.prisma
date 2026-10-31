@@ -1,0 +1,1211 @@
+// Zawli — multi-tenant restaurant operations schema.
+//
+// Conventions (see docs/DATABASE.md):
+//  * Every tenant-owned table carries `tenantId`.
+//  * Child tables reference their tenant-owned parents through COMPOSITE foreign
+//    keys (tenantId, parentId) -> parent(tenantId, id). Postgres therefore rejects
+//    any row that would link records belonging to two different tenants.
+//  * Money is stored as integer minor units (`...Minor`) in the tenant currency.
+//    UGX has no minor unit, so 25,000 UGX is stored as 25000.
+//  * All timestamps are written by the app in UTC (Prisma `timestamp(3)`, server
+//    timezone UTC) and rendered in the tenant or branch timezone.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ───────────────────────────── Enums ─────────────────────────────
+
+enum PlatformRole {
+  SUPER_ADMIN
+  PLATFORM_BILLING
+  PLATFORM_SUPPORT
+}
+
+enum TenantRole {
+  RESTAURANT_OWNER
+  MANAGER
+  WAITER
+  KITCHEN
+}
+
+enum TenantStatus {
+  ONBOARDING
+  ACTIVE
+  SUSPENDED
+  DEACTIVATED
+}
+
+enum FulfillmentMode {
+  DIGITAL_DISPLAY
+  PRINTER
+  MANUAL
+  DIGITAL_AND_PRINTER
+}
+
+enum OrderStatus {
+  /// Pay-first restaurants: created but not sent to the kitchen until paid.
+  PENDING_PAYMENT
+  PLACED
+  ACKNOWLEDGED
+  PREPARING
+  READY
+  OUT_FOR_DELIVERY
+  SERVED
+  COMPLETED
+  CANCELLED
+}
+
+enum TicketStatus {
+  PLACED
+  ACKNOWLEDGED
+  PREPARING
+  READY
+  CANCELLED
+}
+
+enum OrderPaymentStatus {
+  UNPAID
+  PARTIALLY_PAID
+  PAID
+}
+
+enum ActorType {
+  CUSTOMER
+  STAFF
+  SYSTEM
+}
+
+enum PaymentMethod {
+  CASH
+  MOBILE_MONEY
+  CARD
+  OTHER
+}
+
+enum PaymentRecordStatus {
+  RECORDED
+  VOIDED
+}
+
+/// Who created a payment record: staff at the restaurant, or a confirmed provider payment.
+enum PaymentSource {
+  STAFF
+  PROVIDER
+}
+
+/// When guests pay. PAY_FIRST: an order reaches the kitchen only after payment.
+enum PaymentTiming {
+  PAY_FIRST
+  PAY_AFTER
+}
+
+/// Mobile money networks guests can pay with (pay-first restaurants).
+enum MobileMoneyProvider {
+  /// MTN MoMo Collections API (request-to-pay prompt on the guest's phone).
+  MTN_MOMO
+  /// Airtel Money Collections API (USSD push prompt on the guest's phone).
+  AIRTEL_MONEY
+}
+
+enum PaymentIntentStatus {
+  /// Request sent; waiting for the guest to approve with their PIN.
+  PENDING
+  SUCCESSFUL
+  FAILED
+  EXPIRED
+}
+
+enum MobileMoneyEnvironment {
+  /// Built-in simulator for development and demos. Never moves real money.
+  SIMULATOR
+  /// The provider's test environment (MTN sandbox / Airtel UAT).
+  SANDBOX
+  /// Live provider API.
+  PRODUCTION
+}
+
+enum QrTokenStatus {
+  ACTIVE
+  REVOKED
+}
+
+enum TableSessionStatus {
+  OPEN
+  CLOSED
+  EXPIRED
+}
+
+enum ServiceRequestType {
+  ASSISTANCE
+  BILL
+}
+
+enum ServiceRequestStatus {
+  OPEN
+  ACKNOWLEDGED
+  RESOLVED
+  CANCELLED
+}
+
+enum PrinterConnection {
+  BROWSER
+  PRINT_BRIDGE
+}
+
+enum PrintJobStatus {
+  PENDING
+  PRINTED
+  FAILED
+  CANCELLED
+}
+
+enum SubscriptionStatus {
+  TRIAL
+  ACTIVE
+  PAST_DUE
+  SUSPENDED
+  CANCELLED
+}
+
+enum BillingInterval {
+  MONTHLY
+  YEARLY
+}
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PARTIALLY_PAID
+  PAID
+  VOID
+}
+
+// ─────────────────────── Authentication (Better Auth) ───────────────────────
+// Field names follow Better Auth's core schema. Extra columns are Zawli-specific.
+
+model User {
+  id            String        @id
+  name          String
+  email         String        @unique
+  emailVerified Boolean       @default(false)
+  image         String?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  /// Platform-level role. NULL for restaurant staff.
+  platformRole  PlatformRole?
+  /// Deactivated users cannot sign in or act, regardless of memberships.
+  isActive      Boolean       @default(true)
+  lastLoginAt   DateTime?
+
+  sessions          Session[]
+  accounts          Account[]
+  memberships       Membership[]
+  setupTokens       AccountSetupToken[] @relation("SetupTokenUser")
+  issuedSetupTokens AccountSetupToken[] @relation("SetupTokenIssuer")
+  auditLogs         AuditLog[]
+  statusChanges     OrderStatusHistory[]
+  paymentsRecorded  PaymentRecord[]     @relation("PaymentRecordedBy")
+  paymentsVoided    PaymentRecord[]     @relation("PaymentVoidedBy")
+  invoicesCreated   Invoice[]
+  invoicePayments   InvoicePayment[]
+  serviceAcks       ServiceRequest[]    @relation("ServiceAcknowledgedBy")
+  serviceResolves   ServiceRequest[]    @relation("ServiceResolvedBy")
+  notifications     Notification[]
+}
+
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([userId])
+}
+
+model Verification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+}
+
+/// One-time link used for first login (restaurant owners, invited staff) and
+/// administrator-issued password resets. Only a SHA-256 hash of the token is stored.
+model AccountSetupToken {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation("SetupTokenUser", fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash   String    @unique
+  expiresAt   DateTime
+  usedAt      DateTime?
+  createdById String?
+  createdBy   User?     @relation("SetupTokenIssuer", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt   DateTime  @default(now())
+
+  @@index([userId])
+}
+
+// ───────────────────────────── Tenancy ─────────────────────────────
+
+model Tenant {
+  id                    String       @id @default(cuid())
+  slug                  String       @unique
+  name                  String
+  legalName             String?
+  status                TenantStatus @default(ONBOARDING)
+  /// Clearly fictional demo data (seed). Shown with a "Demo" badge.
+  isDemo                Boolean      @default(false)
+  logoUrl               String?
+  brandPrimary          String       @default("#14532D")
+  brandAccent           String       @default("#A3E635")
+  contactEmail          String?
+  contactPhone          String?
+  addressLine           String?
+  city                  String?
+  /// ISO 3166-1 alpha-2
+  country               String       @default("UG")
+  /// ISO 4217
+  currency              String       @default("UGX")
+  /// IANA timezone
+  timezone              String       @default("Africa/Kampala")
+  /// BCP 47 locale used for formatting
+  locale                String       @default("en-UG")
+  onboardingCompletedAt DateTime?
+  suspendedAt           DateTime?
+  suspensionReason      String?
+  createdAt             DateTime     @default(now())
+  updatedAt             DateTime     @updatedAt
+
+  settings          RestaurantSettings?
+  branches          Branch[]
+  memberships       Membership[]
+  branchAssignments StaffBranchAssignment[]
+  categories        MenuCategory[]
+  menuItems         MenuItem[]
+  menuItemBranches  MenuItemBranch[]
+  variants          MenuItemVariant[]
+  modifierGroups    ModifierGroup[]
+  modifierOptions   ModifierOption[]
+  itemModifierLinks MenuItemModifierGroup[]
+  stations          KitchenStation[]
+  routingRules      KitchenRoutingRule[]
+  tables            DiningTable[]
+  qrTokens          TableQrToken[]
+  tableSessions     TableSession[]
+  orders            Order[]
+  orderItems        OrderItem[]
+  orderItemMods     OrderItemModifier[]
+  statusHistory     OrderStatusHistory[]
+  kitchenTickets    KitchenTicket[]
+  printers          PrinterConfiguration[]
+  printJobs         PrintJob[]
+  serviceRequests   ServiceRequest[]
+  payments          PaymentRecord[]
+  paymentIntents    PaymentIntent[]
+  mobileMoney       MobileMoneyAccount[]
+  subscription      Subscription?
+  subscriptionLog   SubscriptionEvent[]
+  invoices          Invoice[]
+  invoicePayments   InvoicePayment[]
+  auditLogs         AuditLog[]
+  notifications     Notification[]
+  events            BranchEvent[]
+
+  @@index([status])
+}
+
+/// Per-tenant operational settings. Tax and service charge are opt-in and
+/// expressed in basis points (1% = 100 bps). Zawli never assumes a tax rate.
+model RestaurantSettings {
+  tenantId                   String  @id
+  tenant                     Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  taxEnabled                 Boolean @default(false)
+  taxLabel                   String  @default("VAT")
+  taxRateBps                 Int     @default(0)
+  /// true: menu prices already include tax (tax is reported, not added).
+  taxInclusive               Boolean @default(true)
+  serviceChargeEnabled       Boolean @default(false)
+  serviceChargeLabel         String  @default("Service charge")
+  serviceChargeBps           Int     @default(0)
+  enableWaiterCalls          Boolean @default(true)
+  enableBillRequests         Boolean @default(true)
+  enableOrderTracking        Boolean @default(true)
+  allowItemNotes             Boolean @default(true)
+  /// An open table session with no activity for this long is treated as expired.
+  tableSessionIdleMinutes    Int     @default(180)
+  /// Kitchen tickets older than this are highlighted as delayed.
+  kitchenDelayWarningMinutes Int     @default(15)
+  maxItemQuantity            Int     @default(20)
+  receiptHeader              String?
+  receiptFooter              String?
+  /// PAY_FIRST: QR orders reach the kitchen only after mobile money payment
+  /// (applies when at least one mobile money provider is enabled).
+  paymentTiming              PaymentTiming @default(PAY_FIRST)
+  /// Unpaid pay-first orders are cancelled after this many minutes.
+  unpaidOrderTimeoutMinutes  Int           @default(15)
+  updatedAt                  DateTime @updatedAt
+}
+
+/// A restaurant's own mobile money collection account (MTN MoMo or Airtel Money).
+/// Money goes straight to the restaurant; Zawli never holds funds.
+/// Credentials are stored as one AES-256-GCM encrypted JSON blob.
+model MobileMoneyAccount {
+  id             String                 @id @default(cuid())
+  tenantId       String
+  tenant         Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  provider       MobileMoneyProvider
+  isEnabled      Boolean                @default(false)
+  environment    MobileMoneyEnvironment @default(SIMULATOR)
+  credentialsEnc String?
+  updatedById    String?
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+
+  @@unique([tenantId, provider])
+}
+
+model Branch {
+  id              String          @id @default(cuid())
+  tenantId        String
+  tenant          Tenant          @relation(fields: [tenantId], references: [id])
+  name            String
+  slug            String
+  addressLine     String?
+  phone           String?
+  /// Overrides the tenant timezone when set.
+  timezone        String?
+  isActive        Boolean         @default(true)
+  fulfillmentMode FulfillmentMode @default(DIGITAL_DISPLAY)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  assignments     StaffBranchAssignment[]
+  paymentIntents  PaymentIntent[]
+  itemOverrides   MenuItemBranch[]
+  stations        KitchenStation[]
+  routingRules    KitchenRoutingRule[]
+  tables          DiningTable[]
+  qrTokens        TableQrToken[]
+  tableSessions   TableSession[]
+  orders          Order[]
+  kitchenTickets  KitchenTicket[]
+  printers        PrinterConfiguration[]
+  printJobs       PrintJob[]
+  serviceRequests ServiceRequest[]
+  payments        PaymentRecord[]
+  events          BranchEvent[]
+  notifications   Notification[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, slug])
+}
+
+/// A user's membership in one tenant. `role` applies at every branch when
+/// `allBranches` is true; otherwise branch access comes from StaffBranchAssignment.
+model Membership {
+  id          String     @id @default(cuid())
+  tenantId    String
+  tenant      Tenant     @relation(fields: [tenantId], references: [id])
+  userId      String
+  user        User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role        TenantRole
+  allBranches Boolean    @default(false)
+  isActive    Boolean    @default(true)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  branchAssignments StaffBranchAssignment[]
+
+  @@unique([tenantId, userId])
+  @@unique([tenantId, id])
+  @@index([userId])
+}
+
+/// Branch-level access with a per-branch role (a person may be MANAGER at one
+/// branch and WAITER at another).
+model StaffBranchAssignment {
+  tenantId     String
+  tenant       Tenant     @relation(fields: [tenantId], references: [id])
+  membershipId String
+  membership   Membership @relation(fields: [tenantId, membershipId], references: [tenantId, id], onDelete: Cascade)
+  branchId     String
+  branch       Branch     @relation(fields: [tenantId, branchId], references: [tenantId, id], onDelete: Cascade)
+  role         TenantRole
+  createdAt    DateTime   @default(now())
+
+  @@id([membershipId, branchId])
+  @@index([tenantId, branchId])
+}
+
+// ───────────────────────────── Menu ─────────────────────────────
+// V1 has one menu per tenant (categories belong to the tenant). Branch-level
+// differences are expressed with MenuItemBranch overrides.
+
+model MenuCategory {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id])
+  name        String
+  description String?
+  sortOrder   Int      @default(0)
+  isArchived  Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  items        MenuItem[]
+  routingRules KitchenRoutingRule[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, isArchived, sortOrder])
+}
+
+model MenuItem {
+  id             String       @id @default(cuid())
+  tenantId       String
+  tenant         Tenant       @relation(fields: [tenantId], references: [id])
+  categoryId     String
+  category       MenuCategory @relation(fields: [tenantId, categoryId], references: [tenantId, id])
+  name           String
+  description    String?
+  imageUrl       String?
+  /// Price when the item has no variants. Ignored when variants exist.
+  basePriceMinor Int
+  /// Global switch. false = temporarily unavailable at every branch.
+  isAvailable    Boolean      @default(true)
+  isArchived     Boolean      @default(false)
+  /// Shown to customers and kitchen, e.g. "Contains peanuts".
+  allergens      String?
+  /// Internal preparation notes for the kitchen. Never shown to customers.
+  prepNotes      String?
+  sortOrder      Int          @default(0)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  variants       MenuItemVariant[]
+  modifierGroups MenuItemModifierGroup[]
+  branchSettings MenuItemBranch[]
+  routingRules   KitchenRoutingRule[]
+  orderItems     OrderItem[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, categoryId, isArchived])
+}
+
+/// Branch override. No row = offered and available at that branch.
+model MenuItemBranch {
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id])
+  menuItemId  String
+  menuItem    MenuItem @relation(fields: [tenantId, menuItemId], references: [tenantId, id], onDelete: Cascade)
+  branchId    String
+  branch      Branch   @relation(fields: [tenantId, branchId], references: [tenantId, id], onDelete: Cascade)
+  isOffered   Boolean  @default(true)
+  isAvailable Boolean  @default(true)
+  updatedAt   DateTime @updatedAt
+
+  @@id([menuItemId, branchId])
+  @@index([tenantId, branchId])
+}
+
+model MenuItemVariant {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id])
+  menuItemId  String
+  menuItem    MenuItem @relation(fields: [tenantId, menuItemId], references: [tenantId, id], onDelete: Cascade)
+  name        String
+  priceMinor  Int
+  isAvailable Boolean  @default(true)
+  isArchived  Boolean  @default(false)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  orderItems OrderItem[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, menuItemId])
+}
+
+model ModifierGroup {
+  id         String   @id @default(cuid())
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id])
+  name       String
+  /// minSelect > 0 makes the group required.
+  minSelect  Int      @default(0)
+  maxSelect  Int      @default(1)
+  isArchived Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  options ModifierOption[]
+  items   MenuItemModifierGroup[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId])
+}
+
+model ModifierOption {
+  id              String        @id @default(cuid())
+  tenantId        String
+  tenant          Tenant        @relation(fields: [tenantId], references: [id])
+  groupId         String
+  group           ModifierGroup @relation(fields: [tenantId, groupId], references: [tenantId, id], onDelete: Cascade)
+  name            String
+  priceDeltaMinor Int           @default(0)
+  isAvailable     Boolean       @default(true)
+  isArchived      Boolean       @default(false)
+  sortOrder       Int           @default(0)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  orderItemModifiers OrderItemModifier[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, groupId])
+}
+
+model MenuItemModifierGroup {
+  tenantId        String
+  tenant          Tenant        @relation(fields: [tenantId], references: [id])
+  menuItemId      String
+  menuItem        MenuItem      @relation(fields: [tenantId, menuItemId], references: [tenantId, id], onDelete: Cascade)
+  modifierGroupId String
+  modifierGroup   ModifierGroup @relation(fields: [tenantId, modifierGroupId], references: [tenantId, id], onDelete: Cascade)
+  sortOrder       Int           @default(0)
+
+  @@id([menuItemId, modifierGroupId])
+  @@index([tenantId, modifierGroupId])
+}
+
+// ───────────────────────────── Kitchen ─────────────────────────────
+
+model KitchenStation {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  branchId  String
+  branch    Branch   @relation(fields: [tenantId, branchId], references: [tenantId, id])
+  name      String
+  /// Receives items with no matching routing rule. One per branch (partial unique index).
+  isDefault Boolean  @default(false)
+  isActive  Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  routingRules KitchenRoutingRule[]
+  tickets      KitchenTicket[]
+  orderItems   OrderItem[]
+  printers     PrinterConfiguration[]
+
+  @@unique([tenantId, id])
+  @@unique([branchId, name])
+  @@index([tenantId, branchId])
+}
+
+/// Routes a menu item (preferred) or a whole category to a station at a branch.
+model KitchenRoutingRule {
+  id         String         @id @default(cuid())
+  tenantId   String
+  tenant     Tenant         @relation(fields: [tenantId], references: [id])
+  branchId   String
+  branch     Branch         @relation(fields: [tenantId, branchId], references: [tenantId, id], onDelete: Cascade)
+  stationId  String
+  station    KitchenStation @relation(fields: [tenantId, stationId], references: [tenantId, id], onDelete: Cascade)
+  categoryId String?
+  category   MenuCategory?  @relation(fields: [tenantId, categoryId], references: [tenantId, id], onDelete: Cascade)
+  menuItemId String?
+  menuItem   MenuItem?      @relation(fields: [tenantId, menuItemId], references: [tenantId, id], onDelete: Cascade)
+  createdAt  DateTime       @default(now())
+
+  @@unique([branchId, categoryId])
+  @@unique([branchId, menuItemId])
+  @@index([tenantId, branchId])
+}
+
+model KitchenTicket {
+  id             String         @id @default(cuid())
+  tenantId       String
+  tenant         Tenant         @relation(fields: [tenantId], references: [id])
+  branchId       String
+  branch         Branch         @relation(fields: [tenantId, branchId], references: [tenantId, id])
+  orderId        String
+  order          Order          @relation(fields: [tenantId, orderId], references: [tenantId, id], onDelete: Cascade)
+  stationId      String
+  station        KitchenStation @relation(fields: [tenantId, stationId], references: [tenantId, id])
+  status         TicketStatus   @default(PLACED)
+  createdAt      DateTime       @default(now())
+  acknowledgedAt DateTime?
+  startedAt      DateTime?
+  readyAt        DateTime?
+  updatedAt      DateTime       @updatedAt
+
+  items     OrderItem[]
+  printJobs PrintJob[]
+
+  @@unique([tenantId, id])
+  /// One ticket per order per station: retries can never duplicate tickets.
+  @@unique([orderId, stationId])
+  @@index([tenantId, branchId, status])
+  @@index([stationId, status])
+}
+
+model PrinterConfiguration {
+  id              String            @id @default(cuid())
+  tenantId        String
+  tenant          Tenant            @relation(fields: [tenantId], references: [id])
+  branchId        String
+  branch          Branch            @relation(fields: [tenantId, branchId], references: [tenantId, id])
+  /// NULL = prints tickets for every station at the branch.
+  stationId       String?
+  station         KitchenStation?   @relation(fields: [tenantId, stationId], references: [tenantId, id])
+  name            String
+  connection      PrinterConnection @default(BROWSER)
+  /// 58 or 80 (thermal) — 210 for A4 browser printing.
+  paperWidthMm    Int               @default(80)
+  copies          Int               @default(1)
+  isActive        Boolean           @default(true)
+  /// SHA-256 of the print-bridge API key (PRINT_BRIDGE connections only).
+  bridgeTokenHash String?           @unique
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  jobs PrintJob[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, branchId])
+}
+
+model PrintJob {
+  id        String               @id @default(cuid())
+  tenantId  String
+  tenant    Tenant               @relation(fields: [tenantId], references: [id])
+  branchId  String
+  branch    Branch               @relation(fields: [tenantId, branchId], references: [tenantId, id])
+  ticketId  String
+  ticket    KitchenTicket        @relation(fields: [tenantId, ticketId], references: [tenantId, id], onDelete: Cascade)
+  printerId String
+  printer   PrinterConfiguration @relation(fields: [tenantId, printerId], references: [tenantId, id], onDelete: Cascade)
+  status    PrintJobStatus       @default(PENDING)
+  attempts  Int                  @default(0)
+  lastError String?
+  createdAt DateTime             @default(now())
+  updatedAt DateTime             @updatedAt
+  printedAt DateTime?
+
+  /// Retries update the same job; they never create a second ticket print job.
+  @@unique([ticketId, printerId])
+  @@index([printerId, status])
+  @@index([tenantId, branchId, status])
+}
+
+// ───────────────────────────── Tables & QR ─────────────────────────────
+
+model DiningTable {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  branchId  String
+  branch    Branch   @relation(fields: [tenantId, branchId], references: [tenantId, id])
+  label     String
+  area      String?
+  seats     Int?
+  isActive  Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  qrTokens        TableQrToken[]
+  sessions        TableSession[]
+  orders          Order[]
+  serviceRequests ServiceRequest[]
+
+  @@unique([tenantId, id])
+  @@unique([branchId, label])
+  @@index([tenantId, branchId])
+}
+
+/// Unpredictable token printed in the table QR code. At most one ACTIVE token per
+/// table (partial unique index in migration). Revoked tokens stop working at once.
+model TableQrToken {
+  id        String        @id @default(cuid())
+  tenantId  String
+  tenant    Tenant        @relation(fields: [tenantId], references: [id])
+  branchId  String
+  branch    Branch        @relation(fields: [tenantId, branchId], references: [tenantId, id])
+  tableId   String
+  table     DiningTable   @relation(fields: [tenantId, tableId], references: [tenantId, id], onDelete: Cascade)
+  token     String        @unique
+  status    QrTokenStatus @default(ACTIVE)
+  createdAt DateTime      @default(now())
+  revokedAt DateTime?
+
+  @@index([tenantId, tableId])
+}
+
+/// A dining session at a table. Several customers (devices) may place independent
+/// orders inside the same session. See docs/ARCHITECTURE.md "Table sessions".
+model TableSession {
+  id             String             @id @default(cuid())
+  tenantId       String
+  tenant         Tenant             @relation(fields: [tenantId], references: [id])
+  branchId       String
+  branch         Branch             @relation(fields: [tenantId, branchId], references: [tenantId, id])
+  tableId        String
+  table          DiningTable        @relation(fields: [tenantId, tableId], references: [tenantId, id])
+  status         TableSessionStatus @default(OPEN)
+  openedAt       DateTime           @default(now())
+  lastActivityAt DateTime           @default(now())
+  closedAt       DateTime?
+  closeReason    String?
+
+  orders          Order[]
+  serviceRequests ServiceRequest[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, tableId, status])
+}
+
+model ServiceRequest {
+  id               String               @id @default(cuid())
+  tenantId         String
+  tenant           Tenant               @relation(fields: [tenantId], references: [id])
+  branchId         String
+  branch           Branch               @relation(fields: [tenantId, branchId], references: [tenantId, id])
+  tableId          String
+  table            DiningTable          @relation(fields: [tenantId, tableId], references: [tenantId, id])
+  tableSessionId   String?
+  tableSession     TableSession?        @relation(fields: [tenantId, tableSessionId], references: [tenantId, id])
+  type             ServiceRequestType
+  status           ServiceRequestStatus @default(OPEN)
+  note             String?
+  createdAt        DateTime             @default(now())
+  acknowledgedAt   DateTime?
+  acknowledgedById String?
+  acknowledgedBy   User?                @relation("ServiceAcknowledgedBy", fields: [acknowledgedById], references: [id], onDelete: SetNull)
+  resolvedAt       DateTime?
+  resolvedById     String?
+  resolvedBy       User?                @relation("ServiceResolvedBy", fields: [resolvedById], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, branchId, status])
+}
+
+// ───────────────────────────── Orders ─────────────────────────────
+
+model Order {
+  id                 String             @id @default(cuid())
+  tenantId           String
+  tenant             Tenant             @relation(fields: [tenantId], references: [id])
+  branchId           String
+  branch             Branch             @relation(fields: [tenantId, branchId], references: [tenantId, id])
+  tableId            String?
+  table              DiningTable?       @relation(fields: [tenantId, tableId], references: [tenantId, id])
+  tableSessionId     String?
+  tableSession       TableSession?      @relation(fields: [tenantId, tableSessionId], references: [tenantId, id])
+  /// Per-tenant sequence, displayed as the human-readable reference.
+  orderNumber        Int
+  reference          String
+  /// Unguessable token that lets the ordering device follow progress.
+  publicToken        String             @unique
+  /// Client-generated key; resubmitting the same cart returns the same order.
+  idempotencyKey     String
+  status             OrderStatus        @default(PLACED)
+  paymentStatus      OrderPaymentStatus @default(UNPAID)
+  currency           String
+  subtotalMinor      Int
+  serviceChargeMinor Int                @default(0)
+  /// Tax added on top (exclusive tax) — 0 when prices are tax-inclusive.
+  taxMinor           Int                @default(0)
+  /// Tax contained in the prices (inclusive tax), for reporting only.
+  taxIncludedMinor   Int                @default(0)
+  totalMinor         Int
+  amountPaidMinor    Int                @default(0)
+  customerName       String?
+  customerNote       String?
+  tableLabel         String?
+  /// Pay-first: unpaid orders are cancelled after this time.
+  paymentDueBy       DateTime?
+  /// When the order was sent to the kitchen (after payment in pay-first mode).
+  releasedAt         DateTime?
+  placedAt           DateTime           @default(now())
+  acknowledgedAt     DateTime?
+  readyAt            DateTime?
+  servedAt           DateTime?
+  completedAt        DateTime?
+  cancelledAt        DateTime?
+  cancelReason       String?
+  updatedAt          DateTime           @updatedAt
+
+  items          OrderItem[]
+  statusHistory  OrderStatusHistory[]
+  tickets        KitchenTicket[]
+  payments       PaymentRecord[]
+  paymentIntents PaymentIntent[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, orderNumber])
+  @@unique([tenantId, idempotencyKey])
+  @@index([tenantId, branchId, status])
+  @@index([tenantId, placedAt])
+  @@index([tenantId, branchId, placedAt])
+  @@index([tableSessionId])
+}
+
+/// Snapshot of what the customer ordered. Menu edits never rewrite these rows.
+model OrderItem {
+  id                  String           @id @default(cuid())
+  tenantId            String
+  tenant              Tenant           @relation(fields: [tenantId], references: [id])
+  orderId             String
+  order               Order            @relation(fields: [tenantId, orderId], references: [tenantId, id], onDelete: Cascade)
+  menuItemId          String?
+  menuItem            MenuItem?        @relation(fields: [tenantId, menuItemId], references: [tenantId, id])
+  variantId           String?
+  variant             MenuItemVariant? @relation(fields: [tenantId, variantId], references: [tenantId, id])
+  stationId           String?
+  station             KitchenStation?  @relation(fields: [tenantId, stationId], references: [tenantId, id])
+  kitchenTicketId     String?
+  kitchenTicket       KitchenTicket?   @relation(fields: [tenantId, kitchenTicketId], references: [tenantId, id])
+  nameSnapshot        String
+  variantNameSnapshot String?
+  categoryNameSnapshot String?
+  allergensSnapshot   String?
+  unitPriceMinor      Int
+  /// Sum of modifier price deltas for ONE unit.
+  modifiersUnitMinor  Int              @default(0)
+  quantity            Int
+  lineTotalMinor      Int
+  note                String?
+  sortOrder           Int              @default(0)
+
+  modifiers OrderItemModifier[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, orderId])
+  @@index([kitchenTicketId])
+  @@index([tenantId, menuItemId])
+}
+
+model OrderItemModifier {
+  id                String          @id @default(cuid())
+  tenantId          String
+  tenant            Tenant          @relation(fields: [tenantId], references: [id])
+  orderItemId       String
+  orderItem         OrderItem       @relation(fields: [tenantId, orderItemId], references: [tenantId, id], onDelete: Cascade)
+  modifierOptionId  String?
+  modifierOption    ModifierOption? @relation(fields: [tenantId, modifierOptionId], references: [tenantId, id])
+  groupNameSnapshot String
+  nameSnapshot      String
+  priceDeltaMinor   Int
+
+  @@index([tenantId, orderItemId])
+}
+
+model OrderStatusHistory {
+  id         String       @id @default(cuid())
+  tenantId   String
+  tenant     Tenant       @relation(fields: [tenantId], references: [id])
+  orderId    String
+  order      Order        @relation(fields: [tenantId, orderId], references: [tenantId, id], onDelete: Cascade)
+  fromStatus OrderStatus?
+  toStatus   OrderStatus
+  actorType  ActorType
+  actorId    String?
+  actor      User?        @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  reason     String?
+  createdAt  DateTime     @default(now())
+
+  @@index([tenantId, orderId, createdAt])
+}
+
+/// Money received at the restaurant (cash, mobile money paid in person, POS card).
+/// Zawli records these; it does not verify them with any provider in V1.
+model PaymentRecord {
+  id                  String              @id @default(cuid())
+  tenantId            String
+  tenant              Tenant              @relation(fields: [tenantId], references: [id])
+  branchId            String
+  branch              Branch              @relation(fields: [tenantId, branchId], references: [tenantId, id])
+  orderId             String
+  order               Order               @relation(fields: [tenantId, orderId], references: [tenantId, id])
+  amountMinor         Int
+  method              PaymentMethod
+  /// Mobile-money transaction ID, POS slip number, etc. (as typed by staff)
+  reference           String?
+  /// Cash handed over; change = tendered - amount.
+  amountTenderedMinor Int?
+  note                String?
+  status              PaymentRecordStatus @default(RECORDED)
+  source              PaymentSource       @default(STAFF)
+  idempotencyKey      String?
+  /// NULL when the payment was confirmed by a provider (e.g. MTN MoMo) rather than staff.
+  recordedById        String?
+  recordedBy          User?               @relation("PaymentRecordedBy", fields: [recordedById], references: [id])
+  recordedAt          DateTime            @default(now())
+  voidedById          String?
+  voidedBy            User?               @relation("PaymentVoidedBy", fields: [voidedById], references: [id])
+  voidedAt            DateTime?
+  voidReason          String?
+
+  paymentIntent PaymentIntent?
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, idempotencyKey])
+  @@index([tenantId, orderId])
+  @@index([tenantId, branchId, recordedAt])
+}
+
+/// A guest's mobile money payment for an order before it goes to the kitchen.
+/// Status is always confirmed by asking the provider (MTN / Airtel) directly;
+/// callbacks only trigger that check — their content is never trusted.
+model PaymentIntent {
+  id                    String                 @id @default(cuid())
+  tenantId              String
+  tenant                Tenant                 @relation(fields: [tenantId], references: [id])
+  branchId              String
+  branch                Branch                 @relation(fields: [tenantId, branchId], references: [tenantId, id])
+  orderId               String
+  order                 Order                  @relation(fields: [tenantId, orderId], references: [tenantId, id])
+  provider              MobileMoneyProvider
+  status                PaymentIntentStatus
+  environment           MobileMoneyEnvironment
+  amountMinor           Int
+  currency              String
+  /// Payer phone number, digits with country code. Personal data: mask when displayed.
+  payerPhone            String
+  /// Our unique reference sent to the provider (MTN X-Reference-Id / Airtel transaction id).
+  providerReference     String                 @unique
+  /// Provider's own transaction id once successful (MTN financialTransactionId / Airtel airtel_money_id).
+  providerTransactionId String?
+  failureReason         String?
+  checkCount            Int                    @default(0)
+  lastCheckedAt         DateTime?
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+  completedAt           DateTime?
+  paymentRecordId       String?
+  paymentRecord         PaymentRecord?      @relation(fields: [tenantId, paymentRecordId], references: [tenantId, id])
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, paymentRecordId])
+  @@index([tenantId, orderId])
+  @@index([status, createdAt])
+  @@index([tenantId, branchId, status])
+}
+
+// ─────────────────────── Platform billing (manual in V1) ───────────────────────
+
+model SubscriptionPlan {
+  id              String          @id @default(cuid())
+  code            String          @unique
+  name            String
+  description     String?
+  priceMinor      Int
+  currency        String          @default("UGX")
+  billingInterval BillingInterval @default(MONTHLY)
+  /// NULL = unlimited
+  maxBranches     Int?
+  isActive        Boolean         @default(true)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  subscriptions Subscription[]
+}
+
+model Subscription {
+  id                 String             @id @default(cuid())
+  tenantId           String             @unique
+  tenant             Tenant             @relation(fields: [tenantId], references: [id])
+  planId             String
+  plan               SubscriptionPlan   @relation(fields: [planId], references: [id])
+  status             SubscriptionStatus @default(TRIAL)
+  trialEndsAt        DateTime?
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  cancelledAt        DateTime?
+  notes              String?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  invoices Invoice[]
+  events   SubscriptionEvent[]
+}
+
+model SubscriptionEvent {
+  id             String              @id @default(cuid())
+  tenantId       String
+  tenant         Tenant              @relation(fields: [tenantId], references: [id])
+  subscriptionId String
+  subscription   Subscription        @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  fromStatus     SubscriptionStatus?
+  toStatus       SubscriptionStatus
+  actorId        String?
+  reason         String?
+  createdAt      DateTime            @default(now())
+
+  @@index([tenantId, createdAt])
+}
+
+model Invoice {
+  id              String        @id @default(cuid())
+  tenantId        String
+  tenant          Tenant        @relation(fields: [tenantId], references: [id])
+  subscriptionId  String?
+  subscription    Subscription? @relation(fields: [subscriptionId], references: [id])
+  number          String        @unique
+  status          InvoiceStatus @default(DRAFT)
+  currency        String
+  periodStart     DateTime
+  periodEnd       DateTime
+  issueDate       DateTime?
+  dueDate         DateTime
+  subtotalMinor   Int
+  taxMinor        Int           @default(0)
+  totalMinor      Int
+  amountPaidMinor Int           @default(0)
+  notes           String?
+  createdById     String?
+  createdBy       User?         @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  paidAt          DateTime?
+  voidedAt        DateTime?
+  voidReason      String?
+
+  lines    InvoiceLine[]
+  payments InvoicePayment[]
+
+  @@index([tenantId, status])
+  @@index([status, dueDate])
+}
+
+model InvoiceLine {
+  id             String  @id @default(cuid())
+  invoiceId      String
+  invoice        Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  description    String
+  quantity       Int     @default(1)
+  unitPriceMinor Int
+  amountMinor    Int
+  sortOrder      Int     @default(0)
+}
+
+model InvoicePayment {
+  id           String        @id @default(cuid())
+  tenantId     String
+  tenant       Tenant        @relation(fields: [tenantId], references: [id])
+  invoiceId    String
+  invoice      Invoice       @relation(fields: [invoiceId], references: [id])
+  amountMinor  Int
+  method       PaymentMethod
+  reference    String?
+  receivedAt   DateTime
+  note         String?
+  recordedById String?
+  recordedBy   User?         @relation(fields: [recordedById], references: [id], onDelete: SetNull)
+  createdAt    DateTime      @default(now())
+
+  @@index([tenantId, invoiceId])
+}
+
+// ───────────────────────────── Operations ─────────────────────────────
+
+/// Atomic named counters (order numbers per tenant, invoice numbers per year).
+model Counter {
+  scope String @id
+  value Int    @default(0)
+}
+
+/// Append-only change feed per branch. Real-time clients (SSE / polling) read
+/// events after their last seen id, so missed events are reconciled on reconnect.
+/// The database rows (orders, tickets) remain the source of truth.
+model BranchEvent {
+  id        BigInt   @id @default(autoincrement())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  branchId  String
+  branch    Branch   @relation(fields: [tenantId, branchId], references: [tenantId, id])
+  type      String
+  entityId  String
+  createdAt DateTime @default(now())
+
+  @@index([branchId, id])
+  @@index([createdAt])
+}
+
+model Notification {
+  id         String    @id @default(cuid())
+  tenantId   String?
+  tenant     Tenant?   @relation(fields: [tenantId], references: [id])
+  branchId   String?
+  branch     Branch?   @relation(fields: [tenantId, branchId], references: [tenantId, id])
+  /// NULL = visible to every member allowed to see this notification type.
+  userId     String?
+  user       User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type       String
+  title      String
+  body       String?
+  entityType String?
+  entityId   String?
+  readAt     DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([tenantId, createdAt])
+  @@index([userId, readAt])
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  /// NULL for platform-level events.
+  tenantId    String?
+  tenant      Tenant?  @relation(fields: [tenantId], references: [id])
+  actorId     String?
+  actor       User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action      String
+  entityType  String
+  entityId    String?
+  /// Small structured context. Never contains secrets or passwords.
+  metadata    Json?
+  ipAddress   String?
+  createdAt   DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+  @@index([action, createdAt])
+  @@index([createdAt])
+}

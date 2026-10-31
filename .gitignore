@@ -1,0 +1,50 @@
+# dependencies
+node_modules/
+
+# next.js
+.next/
+out/
+next-env.d.ts
+
+# build
+build/
+dist/
+*.tsbuildinfo
+
+# prisma generated client
+src/generated/
+
+# env files (keep .env.example)
+.env
+.env.*
+!.env.example
+!deploy/.env.production.example
+
+# local database data (npm run db:local)
+.pg-data/
+
+# uploaded images (local storage driver)
+storage/
+install-dev.log
+
+# testing
+coverage/
+test-results/
+playwright-report/
+playwright/.cache/
+
+# logs
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.claude/
+
+# investor materials stay private
+docs/investor/
+Zawli-Product-Overview.pdf

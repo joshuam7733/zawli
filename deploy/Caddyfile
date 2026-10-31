@@ -1,0 +1,9 @@
+# Caddy gets and renews a free HTTPS certificate (Let's Encrypt) for your domain
+# automatically. Point the domain's DNS "A" record at the server first.
+{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy app:3000 {
+		# Keep kitchen/floor live updates (Server-Sent Events) streaming.
+		flush_interval -1
+	}
+}

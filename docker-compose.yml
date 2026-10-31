@@ -1,0 +1,39 @@
+# Local development stack. Development credentials only — never reuse in production.
+#
+#   docker compose up -d db                     # database only (run the app with `npm run dev`)
+#   docker compose --profile app up --build     # database + app container
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: zawli
+      POSTGRES_PASSWORD: zawli_dev_password
+      POSTGRES_DB: zawli
+    ports:
+      - "5432:5432"
+    volumes:
+      - zawli-pg:/var/lib/postgresql/data
+      - ./scripts/docker-init-test-db.sql:/docker-entrypoint-initdb.d/10-test-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zawli -d zawli"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    profiles: ["app"]
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://zawli:zawli_dev_password@db:5432/zawli
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?set BETTER_AUTH_SECRET in .env}
+      BETTER_AUTH_URL: http://localhost:3000
+      APP_URL: http://localhost:3000
+    ports:
+      - "3000:3000"
+
+volumes:
+  zawli-pg:

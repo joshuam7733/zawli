@@ -1,0 +1,10 @@
+node_modules
+.next
+.pg-data
+.env
+.env.*
+!.env.example
+src/generated
+test-results
+playwright-report
+*.log
